@@ -1,0 +1,37 @@
+﻿#pragma kernel AddExternalForce
+
+#include "../Common.hlsl"
+
+float3 _Gravity;
+float3 _RayOrigin;
+float3 _RayDirection;
+float4 _MouseForceParameter; // x,y,z: Force w: Range
+
+RWStructuredBuffer<Particle> _ParticleBufferRW;
+
+inline float GetMouseForce(float3 position)
+{
+    const float distance_to_mouse_ray = length(cross(_RayDirection, position - _RayOrigin));
+    const float normalized_distance = distance_to_mouse_ray / _MouseForceParameter.w;
+    return smoothstep(1.0, 0.9, normalized_distance);
+}
+
+[numthreads(128, 1, 1)]
+void AddExternalForce(uint3 thread_id : SV_DispatchThreadID)
+{
+    RETURN_IF_INVALID(thread_id);
+
+    const uint p_id = thread_id.x;
+
+    Particle p = _ParticleBufferRW[p_id];
+
+    // forward Euler time integration
+    p.velocity += _Gravity * _DeltaTime;
+
+    // add mouse force
+    float3 mouse_force = GetMouseForce(p.position);
+    mouse_force *= _MouseForceParameter.xyz;
+    p.velocity += mouse_force * _DeltaTime;
+
+    _ParticleBufferRW[p_id] = p;
+}

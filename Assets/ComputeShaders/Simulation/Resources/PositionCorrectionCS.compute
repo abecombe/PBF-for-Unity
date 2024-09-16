@@ -1,0 +1,96 @@
+﻿#pragma kernel CalcLambda
+#pragma kernel CalcDeltaPos
+
+#include "../Common.hlsl"
+
+static const float lambda_epsilon = 100.0f;
+static const float corr_deltaQ_coeff = 0.2f; // 0.1 ~ 0.3
+static const float corr_k = 0.1f; // 0.1
+
+StructuredBuffer<uint2> _GridParticleIDBufferRead;
+
+StructuredBuffer<Particle> _ParticleBufferRead;
+RWStructuredBuffer<Particle> _ParticleBufferWrite;
+
+StructuredBuffer<float> _ParticleLambdaBufferRead;
+RWStructuredBuffer<float> _ParticleLambdaBufferWrite;
+
+float _H;
+float _Rho0;
+
+inline float CalcCorr(float3 r)
+{
+    float x = Poly6W(r, _H) / Poly6W(corr_deltaQ_coeff * _H, _H);
+    // pow(x, 4)
+    x *= x;
+    x *= x;
+    return -corr_k * x;
+}
+
+[numthreads(128, 1, 1)]
+void CalcLambda(uint3 thread_id : SV_DispatchThreadID)
+{
+    RETURN_IF_INVALID(thread_id);
+
+    const uint p_id = thread_id.x;
+
+    const Particle p = _ParticleBufferRead[p_id];
+    const float3 p_pos = p.position;
+
+    float3 grad_i = 0;
+    float sum_gradient_sqr = 0;
+    float density_constraint = 0;
+
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_START(WorldPosToCellIndex(p_pos, _GridMin, _GridInvSpacing), n_id, _GridParticleIDBufferRead, grid_range, _GridSize)
+    {
+        const Particle np = _ParticleBufferRead[n_id];
+
+        const float3 r = p_pos - np.position;
+
+        const float3 grad_j = np.mass * GradW(r, _H);
+        grad_i += grad_j;
+        sum_gradient_sqr += dot(grad_j, grad_j);
+        density_constraint += np.mass * W(r, _H);
+    }
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_END
+
+    density_constraint = density_constraint / _Rho0 - 1.0;
+    density_constraint = max(0, density_constraint);
+    sum_gradient_sqr += dot(grad_i, grad_i);
+    sum_gradient_sqr /= _Rho0 * _Rho0;
+
+    _ParticleLambdaBufferWrite[p_id] = -density_constraint / (sum_gradient_sqr + lambda_epsilon);
+}
+
+[numthreads(128, 1, 1)]
+void CalcDeltaPos(uint3 thread_id : SV_DispatchThreadID)
+{
+    RETURN_IF_INVALID(thread_id);
+
+    const uint p_id = thread_id.x;
+
+    Particle p = _ParticleBufferRead[p_id];
+    const float3 p_pos = p.position;
+
+    const float p_lambda = _ParticleLambdaBufferRead[p_id];
+
+    float3 delta_pos = 0;
+
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_START(WorldPosToCellIndex(p_pos, _GridMin, _GridInvSpacing), n_id, _GridParticleIDBufferRead, grid_range, _GridSize)
+    {
+        const Particle np = _ParticleBufferRead[n_id];
+        const float n_lambda = _ParticleLambdaBufferRead[n_id];
+
+        const float3 r = p_pos - np.position;
+
+        delta_pos += np.mass * (p_lambda + n_lambda + CalcCorr(r)) * GradW(r, _H);
+    }
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_END
+
+    delta_pos /= _Rho0;
+    p.position += delta_pos;
+
+    ClampPosition(p.position, _GridMin, _GridMax);
+
+    _ParticleBufferWrite[p_id] = p;
+}

@@ -1,0 +1,80 @@
+﻿#pragma kernel ComputeOmega
+#pragma kernel AddVorticityForce
+
+#include "../Common.hlsl"
+
+static const float epsilon = 1e-5;
+
+StructuredBuffer<uint2> _GridParticleIDBufferRead;
+
+StructuredBuffer<Particle> _ParticleBufferRead;
+RWStructuredBuffer<Particle> _ParticleBufferWrite;
+
+StructuredBuffer<float> _ParticleDensityBufferRead;
+
+StructuredBuffer<float3> _ParticleOmegaBufferRead;
+RWStructuredBuffer<float3> _ParticleOmegaBufferWrite;
+
+StructuredBuffer<float> _ParticleOmegaLengthBufferRead;
+RWStructuredBuffer<float> _ParticleOmegaLengthBufferWrite;
+
+float _H;
+float _VorticityEpsilon;
+
+[numthreads(128, 1, 1)]
+void ComputeOmega(uint3 thread_id : SV_DispatchThreadID)
+{
+    RETURN_IF_INVALID(thread_id);
+
+    const uint p_id = thread_id.x;
+
+    const Particle p = _ParticleBufferRead[p_id];
+    const float3 p_position = p.position;
+    const float3 p_velocity = p.velocity;
+
+    float3 p_omega = 0;
+
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_START(WorldPosToCellIndex(p_position, _GridMin, _GridInvSpacing), n_id, _GridParticleIDBufferRead, grid_range, _GridSize)
+    {
+        const Particle np = _ParticleBufferRead[n_id];
+        const float np_density = _ParticleDensityBufferRead[n_id];
+
+        p_omega += np.mass / np_density * cross(np.velocity - p_velocity, GradW(p_position - np.position, _H));
+    }
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_END
+
+    _ParticleOmegaBufferWrite[p_id] = p_omega;
+    _ParticleOmegaLengthBufferWrite[p_id] = length(p_omega);
+}
+
+[numthreads(128, 1, 1)]
+void AddVorticityForce(uint3 thread_id : SV_DispatchThreadID)
+{
+    RETURN_IF_INVALID(thread_id);
+
+    const uint p_id = thread_id.x;
+
+    Particle p = _ParticleBufferRead[p_id];
+    const float3 p_position = p.position;
+    const float3 p_omega = _ParticleOmegaBufferRead[p_id];
+
+    float3 location_vector = 0;
+
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_START(WorldPosToCellIndex(p_position, _GridMin, _GridInvSpacing), n_id, _GridParticleIDBufferRead, grid_range, _GridSize)
+    {
+        const Particle np = _ParticleBufferRead[n_id];
+        const float np_density = _ParticleDensityBufferRead[n_id];
+        const float np_omega_length = _ParticleOmegaLengthBufferRead[n_id];
+
+        location_vector += np.mass / np_density * np_omega_length * GradW(p_position - np.position, _H);
+    }
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_END
+
+    location_vector = location_vector / (length(location_vector) + epsilon);
+
+    const float3 vorticity_force = _VorticityEpsilon * cross(location_vector, p_omega);
+
+    p.velocity += vorticity_force * _DeltaTime / p.mass;
+
+    _ParticleBufferWrite[p_id] = p;
+}

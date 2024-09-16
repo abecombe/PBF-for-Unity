@@ -1,0 +1,41 @@
+﻿#pragma kernel AverageVelocityWithNeighbors
+
+#include "../Common.hlsl"
+
+StructuredBuffer<uint2> _GridParticleIDBufferRead;
+
+StructuredBuffer<Particle> _ParticleBufferRead;
+RWStructuredBuffer<Particle> _ParticleBufferWrite;
+
+StructuredBuffer<float> _ParticleDensityBufferRead;
+
+float _H;
+float _XSPHViscosity;
+
+[numthreads(128, 1, 1)]
+void AverageVelocityWithNeighbors(uint3 thread_id : SV_DispatchThreadID)
+{
+    RETURN_IF_INVALID(thread_id);
+
+    const uint p_id = thread_id.x;
+
+    Particle p = _ParticleBufferRead[p_id];
+    const float3 p_position = p.position;
+    const float3 p_velocity = p.velocity;
+
+    float3 p_del_vel = 0;
+
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_START(WorldPosToCellIndex(p_position, _GridMin, _GridInvSpacing), n_id, _GridParticleIDBufferRead, grid_range, _GridSize)
+    {
+        const Particle np = _ParticleBufferRead[n_id];
+        const float np_density = _ParticleDensityBufferRead[n_id];
+
+        p_del_vel += np.mass / np_density * (np.velocity - p_velocity) * Poly6W(p_position - np.position, _H);
+    }
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_END
+
+    // 全部加速度化する
+    p.velocity += _XSPHViscosity * p_del_vel;
+
+    _ParticleBufferWrite[p_id] = p;
+}

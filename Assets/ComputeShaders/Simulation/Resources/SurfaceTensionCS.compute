@@ -1,0 +1,85 @@
+﻿#pragma kernel ComputeNormal
+#pragma kernel AddSurfaceTension
+
+#include "../Common.hlsl"
+
+static const float epsilon = 1e-5;
+
+StructuredBuffer<uint2> _GridParticleIDBufferRead;
+
+StructuredBuffer<Particle> _ParticleBufferRead;
+RWStructuredBuffer<Particle> _ParticleBufferWrite;
+
+StructuredBuffer<float> _ParticleDensityBufferRead;
+
+StructuredBuffer<float3> _ParticleNormalBufferRead;
+RWStructuredBuffer<float3> _ParticleNormalBufferWrite;
+
+RWStructuredBuffer<float3> _ParticleAccelerationBufferRW;
+
+float _H;
+float _Rho0;
+float _SurfaceTensionGamma;
+
+[numthreads(128, 1, 1)]
+void ComputeNormal(uint3 thread_id : SV_DispatchThreadID)
+{
+    RETURN_IF_INVALID(thread_id);
+
+    const uint p_id = thread_id.x;
+
+    const Particle p = _ParticleBufferRead[p_id];
+    const float3 p_position = p.position;
+
+    float3 p_normal = 0;
+
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_START(WorldPosToCellIndex(p_position, _GridMin, _GridInvSpacing), n_id, _GridParticleIDBufferRead, grid_range, _GridSize)
+    {
+        const Particle np = _ParticleBufferRead[n_id];
+        const float np_density = _ParticleDensityBufferRead[n_id];
+
+        p_normal += np.mass / np_density * GradW(p_position - np.position, _H);
+    }
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_END
+
+    p_normal *= _H;
+
+    _ParticleNormalBufferWrite[p_id] = p_normal;
+}
+
+[numthreads(128, 1, 1)]
+void AddSurfaceTension(uint3 thread_id : SV_DispatchThreadID)
+{
+    RETURN_IF_INVALID(thread_id);
+
+    const uint p_id = thread_id.x;
+
+    Particle p = _ParticleBufferRead[p_id];
+    const float3 p_position = p.position;
+    const float p_density = _ParticleDensityBufferRead[p_id];
+    const float3 p_normal = _ParticleNormalBufferRead[p_id];
+
+    float3 acceleration = 0;
+
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_START(WorldPosToCellIndex(p_position, _GridMin, _GridInvSpacing), n_id, _GridParticleIDBufferRead, grid_range, _GridSize)
+    {
+        const Particle np = _ParticleBufferRead[n_id];
+        const float np_density = _ParticleDensityBufferRead[n_id];
+        const float3 np_normal = _ParticleNormalBufferRead[n_id];
+
+        const float3 r = p_position - np.position;
+        const float r_len = length(r);
+        if (r_len == 0) continue;
+
+        const float3 cohesion = np.mass * CohesionW(r_len, _H) * r / r_len;
+        const float3 curvature = p_normal - np_normal;
+
+        acceleration += 1 / (p_density + np_density) * (cohesion + curvature);
+    }
+    FOR_EACH_NEIGHBOR_CELL_PARTICLE_END
+
+    acceleration *= 2.0 * _Rho0;
+    acceleration *= -_SurfaceTensionGamma;
+
+    _ParticleAccelerationBufferRW[p_id] += acceleration;
+}
